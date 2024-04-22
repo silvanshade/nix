@@ -5,15 +5,22 @@
 #include "serialise.hh"
 #include "file-system.hh"
 
+#include "nix-rust-bridge/src/gen/hash/blake3.rs.h"
+
+#include <openssl/crypto.h>
+#include <openssl/md5.h>
+#include <openssl/sha.h>
+
 namespace nix {
 
 
 MakeError(BadHash, Error);
 
 
-enum struct HashAlgorithm : char { MD5 = 42, SHA1, SHA256, SHA512 };
+enum struct HashAlgorithm : char { MD5 = 42, SHA1, SHA256, SHA512, BLAKE3 };
 
 
+const int blake3HashSize = 32;
 const int md5HashSize = 16;
 const int sha1HashSize = 20;
 const int sha256HashSize = 32;
@@ -214,8 +221,81 @@ std::optional<HashAlgorithm> parseHashAlgoOpt(std::string_view s);
  */
 std::string_view printHashAlgo(HashAlgorithm ha);
 
+class HashCtx {
+public:
+    static auto create(HashAlgorithm ha) -> std::unique_ptr<HashCtx>;
+protected:
+    HashCtx() = default;
+public:
+    virtual void update(std::string_view const data) = 0;
+    virtual auto update_mmap(std::string const& path) -> void {
+        std::abort();
+    };
+    virtual void finish(uint8_t hash[Hash::maxHashSize]) = 0;
+    virtual auto currentHash() -> Hash = 0;
+};
 
-union Ctx;
+class BLAKE3HashCtx: public HashCtx {
+public:
+    ::rust::Box<nix::rust::hash::blake3::Blake3Ctx> storage = nix::rust::hash::blake3::create();
+
+    void update(std::string_view const data) override;
+    void update_mmap(std::string const& path) override;
+    void finish(uint8_t hash[Hash::maxHashSize]) override;
+    auto currentHash() -> Hash override;
+};
+
+class MD5HashCtx: public HashCtx {
+public:
+    MD5_CTX storage;
+
+    MD5HashCtx() {
+        MD5_Init(&storage);
+    }
+
+    void update(std::string_view const data) override;
+    void finish(uint8_t hash[Hash::maxHashSize]) override;
+    auto currentHash() -> Hash override;
+};
+
+class SHA1HashCtx: public HashCtx {
+public:
+    SHA_CTX storage;
+
+    SHA1HashCtx() {
+        SHA1_Init(&storage);
+    }
+
+    void update(std::string_view const data) override;
+    void finish(uint8_t hash[Hash::maxHashSize]) override;
+    auto currentHash() -> Hash override;
+};
+
+class SHA256HashCtx: public HashCtx {
+public:
+    SHA256_CTX storage;
+
+    SHA256HashCtx() {
+        SHA256_Init(&storage);
+    }
+
+    void update(std::string_view const data) override;
+    void finish(uint8_t hash[Hash::maxHashSize]) override;
+    auto currentHash() -> Hash override;
+};
+
+class SHA512HashCtx: public HashCtx {
+public:
+    SHA512_CTX storage;
+
+    SHA512HashCtx() {
+        SHA512_Init(&storage);
+    }
+
+    void update(std::string_view const data) override;
+    void finish(uint8_t hash[Hash::maxHashSize]) override;
+    auto currentHash() -> Hash override;
+};
 
 struct AbstractHashSink : virtual Sink
 {
@@ -226,7 +306,7 @@ class HashSink : public BufferedSink, public AbstractHashSink
 {
 private:
     HashAlgorithm ha;
-    Ctx * ctx;
+    std::unique_ptr<HashCtx> ctx;
     uint64_t bytes;
 
 public:
@@ -236,6 +316,10 @@ public:
     void writeUnbuffered(std::string_view data) override;
     HashResult finish() override;
     HashResult currentHash();
+    void readFile(
+        SourceAccessor & accessor,
+        CanonPath const & path,
+        std::function<void(uint64_t)> sizeCallback = [](uint64_t size) {}) override;
 };
 
 

@@ -75,7 +75,7 @@ void dumpPath(
 {
     switch (method) {
     case FileSerialisationMethod::Flat:
-        accessor.readFile(path, sink);
+        sink.readFile(accessor, path);
         break;
     case FileSerialisationMethod::Recursive:
         accessor.dumpPath(path, sink, filter);

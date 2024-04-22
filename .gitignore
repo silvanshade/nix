@@ -90,6 +90,9 @@ perl/Makefile.config
 
 /src/build-remote/build-remote
 
+# rust
+/rust/target
+
 # /tests/functional/
 /tests/functional/test-tmp
 /tests/functional/common/vars-and-functions.sh

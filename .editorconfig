@@ -16,8 +16,8 @@ charset = utf-8
 indent_style = space
 indent_size = 2
 
-# Match c++/shell/perl, set indent to spaces with width of four
-[*.{hpp,cc,hh,sh,pl,xs}]
+# Match c++/shell/perl/rust, set indent to spaces with width of four
+[*.{hpp,cc,hh,sh,pl,xs,rs}]
 indent_style = space
 indent_size = 4
 

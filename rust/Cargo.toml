@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/bridge",
+]
+
+[workspace.dependencies]
+cxx = { version = "1.0", features = ["c++20"] }
+# pin-project-lite = "0.2" # NOTE: not used yet but will be needed for some things

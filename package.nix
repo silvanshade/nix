@@ -14,6 +14,7 @@
 , bzip2
 , curl
 , editline
+, findutils
 , readline
 , fileset
 , flex
@@ -35,6 +36,7 @@
 , openssl
 , pkg-config
 , rapidcheck
+, rust-bridge
 , sqlite
 , util-linux
 , xz
@@ -152,7 +154,7 @@ mkDerivation (finalAttrs: let
   # to be run later, requiresthe unit tests to be built.
   buildUnitTests = doCheck || installUnitTests;
 
-in {
+in rec {
   inherit pname version;
 
   src =
@@ -213,6 +215,7 @@ in {
   nativeBuildInputs = [
     autoconf-archive
     autoreconfHook
+    findutils
     pkg-config
   ] ++ lib.optionals doBuild [
     bison
@@ -261,7 +264,7 @@ in {
 
   propagatedBuildInputs = [
     nlohmann_json
-  ] ++ lib.optional enableGC boehmgc;
+  ] ++ lib.optional enableGC boehmgc ++ [ rust-bridge ];
 
   dontBuild = !attrs.doBuild;
   doCheck = attrs.doCheck;
@@ -346,8 +349,7 @@ in {
   '' + lib.optionalString enableInternalAPIDocs ''
     mkdir -p ''${!outputDoc}/nix-support
     echo "doc internal-api-docs $out/share/doc/nix/internal-api/html" >> ''${!outputDoc}/nix-support/hydra-build-products
-  ''
-    + lib.optionalString enableExternalAPIDocs ''
+  '' + lib.optionalString enableExternalAPIDocs ''
     mkdir -p ''${!outputDoc}/nix-support
     echo "doc external-api-docs $out/share/doc/nix/external-api/html" >> ''${!outputDoc}/nix-support/hydra-build-products
   '';

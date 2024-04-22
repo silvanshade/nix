@@ -3,6 +3,7 @@
 
 #include <memory>
 
+#include "canon-path.hh"
 #include "types.hh"
 #include "util.hh"
 #include "file-descriptor.hh"
@@ -11,6 +12,7 @@ namespace boost::context { struct stack_context; }
 
 namespace nix {
 
+struct SourceAccessor;
 
 /**
  * Abstract destination of binary data.
@@ -20,6 +22,10 @@ struct Sink
     virtual ~Sink() { }
     virtual void operator () (std::string_view data) = 0;
     virtual bool good() { return true; }
+    virtual void readFile(
+        SourceAccessor & accessor,
+        CanonPath const & path,
+        std::function<void(uint64_t)> sizeCallback = [](uint64_t size) {});
 };
 
 /**

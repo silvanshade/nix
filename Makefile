@@ -13,6 +13,7 @@ ifeq ($(ENABLE_BUILD), yes)
 makefiles = \
   mk/precompiled-headers.mk \
   local.mk \
+  src/librust/local.mk \
   src/libutil/local.mk \
   src/libstore/local.mk \
   src/libfetchers/local.mk \

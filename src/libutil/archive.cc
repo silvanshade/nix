@@ -41,7 +41,7 @@ void SourceAccessor::dumpPath(
     {
         sink << "contents";
         std::optional<uint64_t> size;
-        readFile(path, sink, [&](uint64_t _size)
+        sink.readFile(*this, path, [&](uint64_t _size)
         {
             size = _size;
             sink << _size;

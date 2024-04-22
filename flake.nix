@@ -7,6 +7,7 @@
   inputs.nixpkgs-regression.url = "github:NixOS/nixpkgs/215d4d0fd80ca5163643b03a33fde804a29cc1e2";
   inputs.flake-compat = { url = "github:edolstra/flake-compat"; flake = false; };
   inputs.libgit2 = { url = "github:libgit2/libgit2"; flake = false; };
+  inputs.rust-overlay = { url = "github:oxalica/rust-overlay"; };
 
   # dev tooling
   inputs.flake-parts.url = "github:hercules-ci/flake-parts";
@@ -19,7 +20,7 @@
   inputs.pre-commit-hooks.inputs.flake-compat.follows = "";
   inputs.pre-commit-hooks.inputs.gitignore.follows = "";
 
-  outputs = inputs@{ self, nixpkgs, nixpkgs-regression, libgit2, ... }:
+  outputs = inputs@{ self, nixpkgs, nixpkgs-regression, libgit2, rust-overlay, ... }:
 
 
     let
@@ -45,7 +46,7 @@
         "armv7l-unknown-linux-gnueabihf"
         "riscv64-unknown-linux-gnu"
         "x86_64-unknown-netbsd"
-        "x86_64-w64-mingw32"
+        # "x86_64-w64-mingw32" # FIXME: 'gcc-12.3.0' not available (needed by rust overlay)
       ];
 
       stdenvs = [
@@ -82,27 +83,30 @@
 
       # Memoize nixpkgs for different platforms for efficiency.
       nixpkgsFor = forAllSystems
-        (system: let
-          make-pkgs = crossSystem: stdenv: import nixpkgs {
-            localSystem = {
-              inherit system;
+        (system:
+          let
+            make-pkgs = crossSystem: stdenv: import nixpkgs {
+              localSystem = {
+                inherit system;
+              };
+              crossSystem = if crossSystem == null then null else {
+                config = crossSystem;
+              } // lib.optionalAttrs (crossSystem == "x86_64-unknown-freebsd13") {
+                useLLVM = true;
+              };
+              overlays = [
+                rust-overlay.overlays.default
+                (overlayFor (p: p.${stdenv}))
+              ];
             };
-            crossSystem = if crossSystem == null then null else {
-              config = crossSystem;
-            } // lib.optionalAttrs (crossSystem == "x86_64-unknown-freebsd13") {
-              useLLVM = true;
-            };
-            overlays = [
-              (overlayFor (p: p.${stdenv}))
-            ];
-          };
-          stdenvs = forAllStdenvs (make-pkgs null);
-          native = stdenvs.stdenvPackages;
-        in {
-          inherit stdenvs native;
-          static = native.pkgsStatic;
-          cross = forAllCrossSystems (crossSystem: make-pkgs crossSystem "stdenv");
-        });
+            stdenvs = forAllStdenvs (make-pkgs null);
+            native = stdenvs.stdenvPackages;
+          in
+          {
+            inherit stdenvs native;
+            static = native.pkgsStatic;
+            cross = forAllCrossSystems (crossSystem: make-pkgs crossSystem "stdenv");
+          });
 
       installScriptFor = tarballs:
         nixpkgsFor.x86_64-linux.native.callPackage ./scripts/installer.nix {
@@ -115,10 +119,11 @@
             "nix-tests"
             + lib.optionalString
               (lib.versionAtLeast daemon.version "2.4pre20211005" &&
-               lib.versionAtLeast client.version "2.4pre20211005")
+              lib.versionAtLeast client.version "2.4pre20211005")
               "-${client.version}-against-${daemon.version}";
 
           inherit fileset;
+          rust-bridge = pkgs.nix-rust-bridge;
 
           test-client = client;
           test-daemon = daemon;
@@ -164,14 +169,14 @@
           libgit2-nix = final.libgit2.overrideAttrs (attrs: {
             src = libgit2;
             version = libgit2.lastModifiedDate;
-            cmakeFlags = attrs.cmakeFlags or []
+            cmakeFlags = attrs.cmakeFlags or [ ]
               ++ [ "-DUSE_SSH=exec" ];
           });
 
           boehmgc-nix = (final.boehmgc.override {
             enableLargeConfig = true;
-          }).overrideAttrs(o: {
-            patches = (o.patches or []) ++ [
+          }).overrideAttrs (o: {
+            patches = (o.patches or [ ]) ++ [
               ./dep-patches/boehmgc-coroutine-sp-fallback.diff
 
               # https://github.com/ivmai/bdwgc/pull/586
@@ -197,18 +202,21 @@
                 then ""
                 else "pre${builtins.substring 0 8 (self.lastModifiedDate or self.lastModified or "19700101")}_${self.shortRev or "dirty"}";
 
-            in final.callPackage ./package.nix {
-              inherit
-                fileset
-                stdenv
-                versionSuffix
-                ;
-              officialRelease = false;
-              boehmgc = final.boehmgc-nix;
-              libgit2 = final.libgit2-nix;
-              libseccomp = final.libseccomp-nix;
-              busybox-sandbox-shell = final.busybox-sandbox-shell or final.default-busybox-sandbox-shell;
-            } // {
+            in
+            final.callPackage ./package.nix
+              {
+                inherit
+                  fileset
+                  stdenv
+                  versionSuffix
+                  ;
+                officialRelease = false;
+                boehmgc = final.boehmgc-nix;
+                libgit2 = final.libgit2-nix;
+                libseccomp = final.libseccomp-nix;
+                busybox-sandbox-shell = final.busybox-sandbox-shell or final.default-busybox-sandbox-shell;
+                rust-bridge = final.nix-rust-bridge;
+              } // {
               # this is a proper separate downstream package, but put
               # here also for back compat reasons.
               perl-bindings = final.nix-perl-bindings;
@@ -216,6 +224,10 @@
 
           nix-perl-bindings = final.callPackage ./perl {
             inherit fileset stdenv;
+          };
+
+          nix-rust-bridge = final.callPackage ./rust {
+            inherit fileset;
           };
 
           # See https://github.com/NixOS/nixpkgs/pull/214409
@@ -227,10 +239,15 @@
 
         };
 
-    in {
-      # A Nixpkgs overlay that overrides the 'nix' and
-      # 'nix.perl-bindings' packages.
-      overlays.default = overlayFor (p: p.stdenv);
+    in
+    {
+      # A Nixpkgs overlay that overrides the 'nix', 'nix.perl-bindings', and
+      # 'nix.rust-bridge' packages.
+      overlays.default = nixpkgs.lib.composeManyExtensions [
+        rust-overlay.overlays.default
+        overlayFor
+        (p: p.stdenv)
+      ];
 
       hydraJobs = {
 
@@ -242,7 +259,7 @@
         buildStatic = lib.genAttrs linux64BitSystems (system: self.packages.${system}.nix-static);
 
         buildCross = forAllCrossSystems (crossSystem:
-          lib.genAttrs ["x86_64-linux"] (system: self.packages.${system}."nix-${crossSystem}"));
+          lib.genAttrs [ "x86_64-linux" ] (system: self.packages.${system}."nix-${crossSystem}"));
 
         buildNoGc = forAllSystems (system:
           self.packages.${system}.nix.override { enableGC = false; }
@@ -268,12 +285,48 @@
         # Perl bindings for various platforms.
         perlBindings = forAllSystems (system: nixpkgsFor.${system}.native.nix.perl-bindings);
 
+        # rustBridgeChecks = forAllSystems (system: with nixpkgsFor.${system}.native;
+        #   let
+        #     namePrefix = "nix-rust-bridge-checks";
+        #     fmt = stdenv.mkDerivation {
+        #       name = "${namePrefix}-fmt";
+        #       src = ./rust;
+        #       nativeBuildInputs = [ rust-bin.nightly."2024-04-27".default ];
+        #       phases = [ "buildPhase" ];
+        #       buildPhase = ''
+        #         pwd
+        #         ls -lash
+        #         cargo fmt --all -- --check
+        #       '';
+        #     };
+        #     clippy = stdenv.mkDerivation {
+        #       name = "${namePrefix}-clippy";
+        #       src = ./rust;
+        #       nativeBuildInputs = [ rust-bin.stable.latest.default ];
+        #       phases = [ "buildPhase" ];
+        #       buildPhase = ''
+        #         pwd
+        #         ls -lash
+        #         cargo clippy --workspace --all-targets --all-features --offline -- -D warnings
+        #       '';
+        #     };
+        #   in
+        #   runCommand "" {
+        #     nativeBuildInputs = [
+        #       fmt
+        #       clippy
+        #     ];
+        #   }
+        #   ''
+        #     true
+        #   '');
+
         # Binary tarball for various platforms, containing a Nix store
         # with the closure of 'nix' package, and the second half of
         # the installation script.
         binaryTarball = forAllSystems (system: binaryTarball nixpkgsFor.${system}.native.nix nixpkgsFor.${system}.native);
 
-        binaryTarballCross = lib.genAttrs ["x86_64-linux"] (system:
+        binaryTarballCross = lib.genAttrs [ "x86_64-linux" ] (system:
           forAllCrossSystems (crossSystem:
             binaryTarball
               self.packages.${system}."nix-${crossSystem}"
@@ -316,6 +369,7 @@
 
         # API docs for Nix's unstable internal C++ interfaces.
         internal-api-docs = nixpkgsFor.x86_64-linux.native.callPackage ./package.nix {
+          rust-bridge = nixpkgsFor.x86_64-linux.native.nix-rust-bridge;
           inherit fileset;
           doBuild = false;
           enableInternalAPIDocs = true;
@@ -323,6 +377,7 @@
 
         # API docs for Nix's C bindings.
         external-api-docs = nixpkgsFor.x86_64-linux.native.callPackage ./package.nix {
+          rust-bridge = nixpkgsFor.x86_64-linux.native.nix-rust-bridge;
           inherit fileset;
           doBuild = false;
           enableExternalAPIDocs = true;
@@ -352,7 +407,8 @@
           nixpkgsLibTests =
             forAllSystems (system:
               import (nixpkgs + "/lib/tests/release.nix")
-                { pkgs = nixpkgsFor.${system}.native;
+                {
+                  pkgs = nixpkgsFor.${system}.native;
                   nixVersions = [ self.packages.${system}.nix ];
                 }
             );
@@ -365,17 +421,18 @@
 
         installTests = forAllSystems (system:
           let pkgs = nixpkgsFor.${system}.native; in
-          pkgs.runCommand "install-tests" {
-            againstSelf = testNixVersions pkgs pkgs.nix pkgs.pkgs.nix;
-            againstCurrentUnstable =
-              # FIXME: temporarily disable this on macOS because of #3605.
-              if system == "x86_64-linux"
-              then testNixVersions pkgs pkgs.nix pkgs.nixUnstable
-              else null;
-            # Disabled because the latest stable version doesn't handle
-            # `NIX_DAEMON_SOCKET_PATH` which is required for the tests to work
-            # againstLatestStable = testNixVersions pkgs pkgs.nix pkgs.nixStable;
-          } "touch $out");
+          pkgs.runCommand "install-tests"
+            {
+              againstSelf = testNixVersions pkgs pkgs.nix pkgs.pkgs.nix;
+              againstCurrentUnstable =
+                # FIXME: temporarily disable this on macOS because of #3605.
+                if system == "x86_64-linux"
+                then testNixVersions pkgs pkgs.nix pkgs.nixUnstable
+                else null;
+              # Disabled because the latest stable version doesn't handle
+              # `NIX_DAEMON_SOCKET_PATH` which is required for the tests to work
+              # againstLatestStable = testNixVersions pkgs pkgs.nix pkgs.nixStable;
+            } "touch $out");
 
         installerTests = import ./tests/installer {
           binaryTarballs = self.hydraJobs.binaryTarball;
@@ -385,14 +442,15 @@
       };
 
       checks = forAllSystems (system: {
+        # rustBridgeChecks = self.hydraJobs.rustBridgeChecks.${system};
         binaryTarball = self.hydraJobs.binaryTarball.${system};
         installTests = self.hydraJobs.installTests.${system};
         nixpkgsLibTests = self.hydraJobs.tests.nixpkgsLibTests.${system};
         rl-next =
           let pkgs = nixpkgsFor.${system}.native;
           in pkgs.buildPackages.runCommand "test-rl-next-release-notes" { } ''
-          LANG=C.UTF-8 ${pkgs.changelog-d-nix}/bin/changelog-d ${./doc/manual/rl-next} >$out
-        '';
+            LANG=C.UTF-8 ${pkgs.changelog-d-nix}/bin/changelog-d ${./doc/manual/rl-next} >$out
+          '';
       } // (lib.optionalAttrs (builtins.elem system linux64BitSystems)) {
         dockerImage = self.hydraJobs.dockerImage.${system};
       } // (lib.optionalAttrs (!(builtins.elem system linux32BitSystems))) {
@@ -400,92 +458,100 @@
         # Since the support is only best-effort there, disable the perl
         # bindings
         perlBindings = self.hydraJobs.perlBindings.${system};
-      } // devFlake.checks.${system} or {}
+      } // devFlake.checks.${system} or { }
       );
 
       packages = forAllSystems (system: rec {
         inherit (nixpkgsFor.${system}.native) nix changelog-d-nix;
         default = nix;
-      } // (lib.optionalAttrs (builtins.elem system linux64BitSystems) {
-        nix-static = nixpkgsFor.${system}.static.nix;
-        dockerImage =
-          let
-            pkgs = nixpkgsFor.${system}.native;
-            image = import ./docker.nix { inherit pkgs; tag = version; };
-          in
-          pkgs.runCommand
-            "docker-image-tarball-${version}"
-            { meta.description = "Docker image with Nix for ${system}"; }
-            ''
-              mkdir -p $out/nix-support
-              image=$out/image.tar.gz
-              ln -s ${image} $image
-              echo "file binary-dist $image" >> $out/nix-support/hydra-build-products
-            '';
-      } // builtins.listToAttrs (map
-          (crossSystem: {
-            name = "nix-${crossSystem}";
-            value = nixpkgsFor.${system}.cross.${crossSystem}.nix;
-          })
-          crossSystems)
-        // builtins.listToAttrs (map
-          (stdenvName: {
-            name = "nix-${stdenvName}";
-            value = nixpkgsFor.${system}.stdenvs."${stdenvName}Packages".nix;
-          })
-          stdenvs)));
+      } // (lib.optionalAttrs (builtins.elem system linux64BitSystems)
+        {
+          nix-rust-bridge = nixpkgsFor.${system}.native.nix-rust-bridge;
+          nix-static = nixpkgsFor.${system}.static.nix;
+          dockerImage =
+            let
+              pkgs = nixpkgsFor.${system}.native;
+              image = import ./docker.nix { inherit pkgs; tag = version; };
+            in
+            pkgs.runCommand
+              "docker-image-tarball-${version}"
+              { meta.description = "Docker image with Nix for ${system}"; }
+              ''
+                mkdir -p $out/nix-support
+                image=$out/image.tar.gz
+                ln -s ${image} $image
+                echo "file binary-dist $image" >> $out/nix-support/hydra-build-products
+              '';
+        } // builtins.listToAttrs (map
+        (crossSystem: {
+          name = "nix-${crossSystem}";
+          value = nixpkgsFor.${system}.cross.${crossSystem}.nix;
+        })
+        crossSystems)
+      // builtins.listToAttrs (map
+        (stdenvName: {
+          name = "nix-${stdenvName}";
+          value = nixpkgsFor.${system}.stdenvs."${stdenvName}Packages".nix;
+        })
+        stdenvs)));
 
-      devShells = let
-        makeShell = pkgs: stdenv: (pkgs.nix.override { inherit stdenv; forDevShell = true; }).overrideAttrs (attrs:
+      devShells =
         let
-          modular = devFlake.getSystem stdenv.buildPlatform.system;
-        in {
-          pname = "shell-for-" + attrs.pname;
-          installFlags = "sysconfdir=$(out)/etc";
-          shellHook = ''
-            PATH=$prefix/bin:$PATH
-            unset PYTHONPATH
-            export MANPATH=$out/share/man:$MANPATH
+          makeShell = pkgs: stdenv: (pkgs.nix.override { inherit stdenv; forDevShell = true; }).overrideAttrs (attrs:
+            let
+              modular = devFlake.getSystem stdenv.buildPlatform.system;
+            in
+            {
+              pname = "shell-for-" + attrs.pname;
+              installFlags = "sysconfdir=$(out)/etc";
+              shellHook = ''
+                PATH=$prefix/bin:$PATH
+                unset PYTHONPATH
+                export MANPATH=$out/share/man:$MANPATH
 
-            # Make bash completion work.
-            XDG_DATA_DIRS+=:$out/share
-          '';
+                # Make bash completion work.
+                XDG_DATA_DIRS+=:$out/share
+              '';
 
-          # We use this shell with the local checkout, not unpackPhase.
-          src = null;
+              # We use this shell with the local checkout, not unpackPhase.
+              src = null;
 
-          env = {
-            # For `make format`, to work without installing pre-commit
-            _NIX_PRE_COMMIT_HOOKS_CONFIG =
-              "${(pkgs.formats.yaml { }).generate "pre-commit-config.yaml" modular.pre-commit.settings.rawConfig}";
-          };
+              env = {
+                # FIXME: make rustPlatform a passthru for rust-nix-bridge
+                # # Enable `rust-analyzer` to find the Rust source code.
+                # RUST_SRC_PATH = "${pkgs.rustPlatform.rustLibSrc}";
 
-          nativeBuildInputs = attrs.nativeBuildInputs or []
-            ++ [
-              modular.pre-commit.settings.package
-              (pkgs.writeScriptBin "pre-commit-hooks-install"
-                modular.pre-commit.settings.installationScript)
-            ]
-            # TODO: Remove the darwin check once
-            # https://github.com/NixOS/nixpkgs/pull/291814 is available
-            ++ lib.optional (stdenv.cc.isClang && !stdenv.buildPlatform.isDarwin) pkgs.buildPackages.bear
-            ++ lib.optional (stdenv.cc.isClang && stdenv.hostPlatform == stdenv.buildPlatform) pkgs.buildPackages.clang-tools;
-        });
+                # For `make format`, to work without installing pre-commit
+                _NIX_PRE_COMMIT_HOOKS_CONFIG =
+                  "${(pkgs.formats.yaml { }).generate "pre-commit-config.yaml" modular.pre-commit.settings.rawConfig}";
+              };
+
+              nativeBuildInputs = attrs.nativeBuildInputs or [ ]
+                ++ [
+                modular.pre-commit.settings.package
+                (pkgs.writeScriptBin "pre-commit-hooks-install"
+                  modular.pre-commit.settings.installationScript)
+              ]
+                # TODO: Remove the darwin check once
+                # https://github.com/NixOS/nixpkgs/pull/291814 is available
+                ++ lib.optional (stdenv.cc.isClang && !stdenv.buildPlatform.isDarwin) pkgs.buildPackages.bear
+                ++ lib.optional (stdenv.cc.isClang && stdenv.hostPlatform == stdenv.buildPlatform) pkgs.buildPackages.clang-tools;
+            });
         in
         forAllSystems (system:
           let
             makeShells = prefix: pkgs:
               lib.mapAttrs'
-              (k: v: lib.nameValuePair "${prefix}-${k}" v)
-              (forAllStdenvs (stdenvName: makeShell pkgs pkgs.${stdenvName}));
+                (k: v: lib.nameValuePair "${prefix}-${k}" v)
+                (forAllStdenvs (stdenvName: makeShell pkgs pkgs.${stdenvName}));
           in
-            (makeShells "native" nixpkgsFor.${system}.native) //
-            (lib.optionalAttrs (!nixpkgsFor.${system}.native.stdenv.isDarwin)
-              (makeShells "static" nixpkgsFor.${system}.static) //
-              (forAllCrossSystems (crossSystem: let pkgs = nixpkgsFor.${system}.cross.${crossSystem}; in makeShell pkgs pkgs.stdenv))) //
-            {
-              default = self.devShells.${system}.native-stdenvPackages;
-            }
+          (makeShells "native" nixpkgsFor.${system}.native) //
+          (lib.optionalAttrs (!nixpkgsFor.${system}.native.stdenv.isDarwin)
+            (makeShells "static" nixpkgsFor.${system}.static) //
+          (forAllCrossSystems (crossSystem: let pkgs = nixpkgsFor.${system}.cross.${crossSystem}; in makeShell pkgs pkgs.stdenv))) //
+          {
+            default = self.devShells.${system}.native-stdenvPackages;
+          }
         );
-  };
+    };
 }

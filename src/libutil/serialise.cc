@@ -1,8 +1,10 @@
 #include "serialise.hh"
 #include "signals.hh"
+#include "source-accessor.hh"
 
 #include <cstring>
 #include <cerrno>
+#include <filesystem>
 #include <memory>
 
 #include <boost/coroutine2/coroutine.hpp>
@@ -14,6 +16,24 @@
 
 
 namespace nix {
+
+void Sink::readFile(SourceAccessor & accessor, CanonPath const & path, std::function<void(uint64_t)> sizeCallback)
+{
+    accessor.readFile(path, *this, sizeCallback);
+}
+
+
+void HashSink::readFile(SourceAccessor & accessor, CanonPath const & path, std::function<void(uint64_t)> sizeCallback)
+{
+    if (this->ha == HashAlgorithm::BLAKE3) {
+        auto abs = path.abs();
+        auto size = std::filesystem::file_size(abs);
+        sizeCallback(size);
+        ctx->update_mmap(abs);
+    } else {
+        this->Sink::readFile(accessor, path, sizeCallback);
+    }
+}
 
 
 void BufferedSink::operator () (std::string_view data)
