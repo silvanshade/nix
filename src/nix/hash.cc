@@ -89,7 +89,7 @@ struct CmdHashBase : Command
 
             auto [accessor_, canonPath] = PosixSourceAccessor::createAtRoot(path);
             auto & accessor = accessor_;
-            Hash h { HashAlgorithm::SHA256 }; // throwaway def to appease C++
+            Hash h { hashAlgo }; // throwaway def to appease C++
             switch (mode) {
             case FileIngestionMethod::Flat:
             case FileIngestionMethod::Recursive:
